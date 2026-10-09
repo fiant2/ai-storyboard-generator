@@ -1,6 +1,6 @@
-// app/page.tsx
 'use client';
-import { useState } from 'react';
+
+import { useState, type FormEvent } from 'react';
 
 interface StoryboardPanel {
   panel_number: number;
@@ -11,19 +11,54 @@ interface StoryboardPanel {
   provider: string;
 }
 
-export default function Home() {
-  const [naskah, setNaskah] = useState<string>('');
-  const [characterRef, setCharacterRef] = useState<string>('');
-  const [loading, setLoading] = useState<boolean>(false);
-  const [result, setResult] = useState<StoryboardPanel[] | null>(null);
-  const [error, setError] = useState<string>('');
-  const [panelLoading, setPanelLoading] = useState<Record<number, boolean>>({});
+interface GenerateResponse {
+  data?: StoryboardPanel[];
+  error?: string;
+  details?: string;
+}
 
-  const handleGenerate = async () => {
+const storyIdeas = [
+  {
+    label: 'Misteri',
+    story: 'Seorang detektif memasuki rumah tua yang sudah lama kosong. Di ruang bawah tanah, ia menemukan foto dirinya saat masih kecil.',
+    character: 'Detektif muda, mantel panjang gelap, membawa senter',
+  },
+  {
+    label: 'Petualangan',
+    story: 'Seorang penjelajah menemukan peta harta karun di dalam botol. Petunjuknya membawanya menyeberangi hutan dan menuju air terjun tersembunyi.',
+    character: 'Penjelajah muda, jaket hijau, ransel usang',
+  },
+  {
+    label: 'Fantasi',
+    story: 'Di sebuah desa di atas awan, seorang anak menemukan seekor naga kecil yang kehilangan jalan pulang. Mereka terbang bersama mencari istananya.',
+    character: 'Anak pemberani, rambut ikal, jubah ungu',
+  },
+];
+
+export default function Home() {
+  const [naskah, setNaskah] = useState('');
+  const [characterRef, setCharacterRef] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<StoryboardPanel[] | null>(null);
+  const [error, setError] = useState('');
+  const [panelLoading, setPanelLoading] = useState<Record<number, boolean>>({});
+  const [panelFailed, setPanelFailed] = useState<Record<number, boolean>>({});
+  const [imageUrls, setImageUrls] = useState<Record<number, string>>({});
+  const [retryCounts, setRetryCounts] = useState<Record<number, number>>({});
+  const [copiedPanel, setCopiedPanel] = useState<number | null>(null);
+  const [storyCopied, setStoryCopied] = useState(false);
+
+  const handleGenerate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!naskah.trim() || loading) return;
+
     setLoading(true);
     setError('');
     setResult(null);
     setPanelLoading({});
+    setPanelFailed({});
+    setImageUrls({});
+    setRetryCounts({});
 
     try {
       const response = await fetch('/api/generate-storyboard', {
@@ -31,134 +66,404 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ naskah, character_ref: characterRef }),
       });
+      const data: GenerateResponse = await response.json();
 
-      const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.details ? `${data.error}: ${data.details}` : data.error || 'Terjadi kesalahan pada server');
+        throw new Error(
+          data.details
+            ? `${data.error || 'Gagal membuat storyboard.'} ${data.details}`
+            : data.error || 'Terjadi kesalahan pada server.',
+        );
       }
-      
+
+      if (!Array.isArray(data.data)) {
+        throw new Error('Server tidak mengembalikan hasil storyboard yang valid.');
+      }
+
       setResult(data.data);
-      
-      const initialLoading: Record<number, boolean> = {};
-      data.data.forEach((panel: StoryboardPanel) => {
-        initialLoading[panel.panel_number] = true;
-      });
-      setPanelLoading(initialLoading);
-      
+      setPanelLoading(
+        Object.fromEntries(data.data.map((panel) => [panel.panel_number, true])),
+      );
+      setImageUrls(
+        Object.fromEntries(data.data.map((panel) => [panel.panel_number, panel.image_url])),
+      );
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : 'Terjadi kesalahan yang tidak diketahui';
-      setError(errorMessage);
+      setError(err instanceof Error ? err.message : 'Terjadi kesalahan yang tidak diketahui.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleImageLoad = (panelNumber: number) => {
-    setPanelLoading(prev => ({ ...prev, [panelNumber]: false }));
+  const retryImage = (panel: StoryboardPanel) => {
+    const currentUrl = imageUrls[panel.panel_number] || panel.image_url;
+    const retryUrl = new URL(currentUrl);
+    const retryCount = (retryCounts[panel.panel_number] || 0) + 1;
+    retryUrl.searchParams.set('retry', retryCount.toString());
+    setRetryCounts((current) => ({ ...current, [panel.panel_number]: retryCount }));
+    setImageUrls((current) => ({ ...current, [panel.panel_number]: retryUrl.toString() }));
+    setPanelFailed((current) => ({ ...current, [panel.panel_number]: false }));
+    setPanelLoading((current) => ({ ...current, [panel.panel_number]: true }));
   };
 
-  const handleImageError = (panelNumber: number, imageUrl: string) => {
-    console.warn(`️ Panel ${panelNumber} gagal, retry...`);
-    const retryUrl = imageUrl.includes('?') ? `${imageUrl}&retry=${Date.now()}` : `${imageUrl}?retry=${Date.now()}`;
-    const img = document.querySelector(`img[data-panel="${panelNumber}"]`) as HTMLImageElement;
-    if (img) img.src = retryUrl;
+  const copyText = async (text: string, panelNumber?: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setError('');
+      if (panelNumber === undefined) {
+        setStoryCopied(true);
+        window.setTimeout(() => setStoryCopied(false), 1800);
+      } else {
+        setCopiedPanel(panelNumber);
+        window.setTimeout(() => setCopiedPanel(null), 1800);
+      }
+    } catch {
+      setError('Tidak dapat menyalin teks. Pastikan izin clipboard di browser diaktifkan.');
+    }
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 text-gray-800 p-6 md:p-12">
-      <div className="max-w-6xl mx-auto space-y-8">
-        <div className="text-center space-y-2">
-          <h1 className="text-4xl font-extrabold text-indigo-700 tracking-tight">AI Storyboard Generator</h1>
-          <p className="text-gray-500">Ubah naskah cerita Anda menjadi visual storyboard dalam hitungan detik.</p>
+    <main className="app-shell">
+      <nav className="site-nav" aria-label="Navigasi utama">
+        <a className="nav-brand" href="#beranda" aria-label="AI Storyboard Generator - Beranda">
+          <span className="nav-brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M4 5.5h16v13H4z" />
+              <path d="m4.5 17 5-5 3.3 3.1 2.2-2.2 4.5 4.1M8 9h.01" />
+            </svg>
+          </span>
+          <span>Story<span>board</span></span>
+        </a>
+        <div className="nav-links">
+          <a className="nav-link" href="#beranda">Beranda</a>
+          <a className="nav-link" href="#tentang">Tentang</a>
+          <a className="nav-cta" href="#generator">Buat storyboard <span aria-hidden="true">↗</span></a>
         </div>
+      </nav>
 
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 space-y-4">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1">Naskah Cerita</label>
-            <textarea
-              className="w-full p-4 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition resize-none"
-              rows={4}
-              placeholder="Contoh: Seorang detektif masuk ke ruangan gelap. Dia menyalakan senter dan menemukan peta. Tiba-tiba bayangan bergerak..."
-              value={naskah}
-              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setNaskah(e.target.value)}
-            />
+      <div className="page-content">
+        <section className="home-section" id="beranda">
+        <header className="hero">
+          <div className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M4 5.5h16v13H4z" />
+              <path d="m4.5 17 5-5 3.3 3.1 2.2-2.2 4.5 4.1M8 9h.01" />
+            </svg>
           </div>
-          
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-1">Referensi Karakter (Opsional)</label>
-            <input
-              type="text"
-              className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 transition"
-              placeholder="Contoh: Detektif pria, jas hujan kuning, topi fedora"
-              value={characterRef}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCharacterRef(e.target.value)}
-            />
+          <p className="eyebrow">CERITA KAMU, VISUALKAN</p>
+          <h1>Ide ceritamu, jadi <span>storyboard.</span></h1>
+          <p className="hero-copy">
+            Ubah naskah cerita menjadi rangkaian adegan visual dengan bantuan AI.
+          </p>
+          <div className="hero-note">
+            <span className="hero-note-sparkle" aria-hidden="true">✦</span>
+            Dari imajinasi jadi empat adegan visual
+          </div>
+        </header>
+
+        <section className="generator-card" id="generator" aria-labelledby="form-heading">
+          <div className="creation-steps" aria-label="Langkah pembuatan storyboard">
+            <span className={`creation-step ${loading || result ? 'complete' : 'active'}`}>
+              <span>{loading || result ? '✓' : '1'}</span>Tulis cerita
+            </span>
+            <span className={`step-line ${result || loading ? 'complete' : ''}`} />
+            <span className={`creation-step ${result ? 'complete' : loading ? 'active' : ''}`}>
+              <span>{result ? '✓' : '2'}</span>Rangkai adegan
+            </span>
+            <span className={`step-line ${result ? 'complete' : ''}`} />
+            <span className={`creation-step ${result ? 'active' : ''}`}><span>3</span>Lihat storyboard</span>
+          </div>
+          <div className="section-heading">
+            <div>
+              <span className="step-label">MULAI DI SINI</span>
+              <h2 id="form-heading">Ceritakan idemu</h2>
+              <p>Isi naskah dan karakter utama untuk membuat empat panel storyboard.</p>
+            </div>
+            <span className="panel-count">
+              <span className="count-dot" aria-hidden="true" />
+              4 panel
+            </span>
           </div>
 
-          <button
-            onClick={handleGenerate}
-            disabled={loading || !naskah.trim()}
-            className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold text-lg hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-all shadow-md hover:shadow-lg"
-          >
-            {loading ? 'Sedang Membuat Storyboard...' : 'Generate Storyboard'}
-          </button>
-        </div>
+          <form className="story-form" onSubmit={handleGenerate}>
+            <div className="field-group">
+              <div className="field-label-row">
+                <label htmlFor="story">Naskah cerita</label>
+                <span className="character-count">{naskah.length} karakter</span>
+              </div>
+              <textarea
+                id="story"
+                name="story"
+                rows={4}
+                placeholder="Contoh: Seorang detektif masuk ke ruangan gelap. Dia menyalakan senter dan menemukan peta. Tiba-tiba bayangan bergerak..."
+                value={naskah}
+                onChange={(event) => {
+                  setNaskah(event.target.value);
+                  if (error) setError('');
+                }}
+                required
+                aria-describedby="story-hint"
+              />
+              <span className="field-hint" id="story-hint">
+                Tuliskan alur cerita yang ingin diubah menjadi adegan visual.
+              </span>
+            </div>
+
+            <div className="idea-picker" aria-label="Pilih contoh cerita">
+              <span className="idea-picker-label">Butuh inspirasi?</span>
+              {storyIdeas.map((idea) => (
+                <button
+                  className="idea-chip"
+                  key={idea.label}
+                  type="button"
+                  onClick={() => {
+                    setNaskah(idea.story);
+                    setCharacterRef(idea.character);
+                    setError('');
+                  }}
+                >
+                  <span aria-hidden="true">✦</span>
+                  {idea.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="field-group">
+              <label htmlFor="character">Referensi karakter <span>(opsional)</span></label>
+              <input
+                id="character"
+                name="character"
+                type="text"
+                placeholder="Contoh: Detektif pria, jas hujan kuning, topi fedora"
+                value={characterRef}
+                onChange={(event) => setCharacterRef(event.target.value)}
+              />
+              <span className="field-hint">
+                Deskripsikan penampilan karakter agar konsisten di setiap panel.
+              </span>
+            </div>
+
+            <button className="generate-button" type="submit" disabled={loading || !naskah.trim()}>
+              {loading ? (
+                <>
+                  <span className="button-spinner" aria-hidden="true" />
+                  Sedang menyusun storyboard...
+                </>
+              ) : (
+                <>
+                  Generate Storyboard
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M5 12h14m-6-6 6 6-6 6" />
+                  </svg>
+                </>
+              )}
+            </button>
+          </form>
+        </section>
 
         {error && (
-          <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
-            <span>⚠️</span> {error}
+          <div className="error-message" role="alert">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 8v5m0 3h.01M10.3 4.7 2.8 18a1.5 1.5 0 0 0 1.3 2.2h15.8a1.5 1.5 0 0 0 1.3-2.2L13.7 4.7a2 2 0 0 0-3.4 0Z" />
+            </svg>
+            <span>{error}</span>
+          </div>
+        )}
+
+        {loading && (
+          <div className="generation-status" role="status" aria-live="polite">
+            <span className="status-spinner" aria-hidden="true" />
+            <div>
+              <strong>AI sedang merangkai ceritamu</strong>
+              <span>Menyiapkan adegan dan ilustrasi. Ini mungkin perlu beberapa saat.</span>
+            </div>
           </div>
         )}
 
         {result && (
-          <div className="space-y-6">
-            <h2 className="text-2xl font-bold text-gray-800 border-b border-gray-200 pb-3">Hasil Storyboard ({result.length} Panel)</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {result.map((panel: StoryboardPanel) => (
-                <div key={panel.panel_number} className="bg-white rounded-2xl shadow-md border border-gray-100 overflow-hidden hover:shadow-xl transition-shadow duration-300">
-                  <div className="relative aspect-video bg-gray-100">
-                    {panelLoading[panel.panel_number] && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500 z-10 bg-gray-100">
-                        <svg className="animate-spin h-8 w-8 text-indigo-600 mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span className="text-sm font-medium">Memuat gambar...</span>
+          <section className="results-section" aria-labelledby="results-heading">
+            <div className="results-heading">
+              <div>
+                <span className="step-label">HASIL GENERASI</span>
+                <h2 id="results-heading">Storyboard kamu</h2>
+              </div>
+                <div className="results-actions">
+                  <span className="results-total">{result.length} adegan</span>
+                  <button
+                    className="text-action"
+                    type="button"
+                    onClick={() => copyText(naskah)}
+                  >
+                    {storyCopied ? 'Naskah tersalin!' : 'Salin naskah'}
+                  </button>
+                  <button
+                    className="text-action"
+                    type="button"
+                    onClick={() => {
+                      document.getElementById('form-heading')?.scrollIntoView({ behavior: 'smooth' });
+                      document.getElementById('story')?.focus({ preventScroll: true });
+                    }}
+                  >
+                    Ubah cerita
+                  </button>
+                  <button
+                    className="text-action text-action-primary"
+                    type="button"
+                    onClick={() => document.querySelector<HTMLFormElement>('.story-form')?.requestSubmit()}
+                  >
+                    Buat ulang
+                  </button>
+                </div>
+              </div>
+
+            <div className="panel-grid">
+              {result.map((panel) => (
+                <article className="panel-card" key={panel.panel_number}>
+                  <div className="panel-image">
+                    {panelLoading[panel.panel_number] && !panelFailed[panel.panel_number] && (
+                      <div className="image-placeholder" role="status">
+                        <span className="status-spinner" aria-hidden="true" />
+                        <span>Menyiapkan ilustrasi...</span>
                       </div>
                     )}
-                    
-                    <img 
-                      src={panel.image_url} 
-                      alt={`Panel ${panel.panel_number}`}
-                      data-panel={panel.panel_number}
-                      className={`w-full h-full object-cover transition-opacity duration-500 ${panelLoading[panel.panel_number] ? 'opacity-0' : 'opacity-100'}`}
-                      onLoad={() => handleImageLoad(panel.panel_number)}
-                      onError={() => handleImageError(panel.panel_number, panel.image_url)}
-                    />
+                    {panelFailed[panel.panel_number] ? (
+                      <div className="image-failed">
+                        <span className="failed-icon" aria-hidden="true">!</span>
+                        <strong>Ilustrasi belum bisa dimuat</strong>
+                        <button type="button" onClick={() => retryImage(panel)}>
+                          Coba muat ulang
+                        </button>
+                      </div>
+                    ) : (
+                      <img
+                        src={imageUrls[panel.panel_number] || panel.image_url}
+                        alt={`Ilustrasi panel ${panel.panel_number}: ${panel.visual_description}`}
+                        className={panelLoading[panel.panel_number] ? 'panel-image-loading' : ''}
+                        onLoad={() =>
+                          setPanelLoading((current) => ({
+                            ...current,
+                            [panel.panel_number]: false,
+                          }))
+                        }
+                        onError={() => {
+                          setPanelLoading((current) => ({
+                            ...current,
+                            [panel.panel_number]: false,
+                          }));
+                          setPanelFailed((current) => ({
+                            ...current,
+                            [panel.panel_number]: true,
+                          }));
+                        }}
+                      />
+                    )}
+                    <span className="image-number">
+                      {String(panel.panel_number).padStart(2, '0')}
+                    </span>
+                    {!panelLoading[panel.panel_number] && !panelFailed[panel.panel_number] && (
+                      <a
+                        className="image-open"
+                        href={imageUrls[panel.panel_number] || panel.image_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`Buka ilustrasi panel ${panel.panel_number} di tab baru`}
+                      >
+                        Buka ilustrasi
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                          <path d="M11 3h6v6m0-6-8 8M15 11v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
+                        </svg>
+                      </a>
+                    )}
                   </div>
-                  
-                  <div className="p-5 space-y-3">
-                    <div className="flex justify-between items-center border-b border-gray-100 pb-2">
-                      <span className="font-bold text-indigo-600 text-lg">Panel {panel.panel_number}</span>
-                      <span className="text-xs font-medium bg-gray-100 text-gray-600 px-2 py-1 rounded-md uppercase tracking-wide">
-                        {panel.camera_angle}
-                      </span>
+
+                  <div className="panel-details">
+                    <div className="panel-meta">
+                      <span className="panel-label">ADEGAN {String(panel.panel_number).padStart(2, '0')}</span>
+                      <span className="camera-tag">{panel.camera_angle}</span>
                     </div>
-                    <p className="text-gray-700 leading-relaxed">&quot;{panel.visual_description}&quot;</p>
-                    <details className="group">
-                      <summary className="cursor-pointer text-sm text-indigo-500 font-medium hover:text-indigo-700 flex items-center gap-1">
-                        <span>Lihat Prompt Gambar</span>
-                        <svg className="w-4 h-4 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                    <p className="panel-description">{panel.visual_description}</p>
+                    <details className="prompt-details">
+                      <summary>
+                        Lihat prompt gambar
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                          <path d="m5 7.5 5 5 5-5" />
+                        </svg>
                       </summary>
-                      <p className="mt-2 text-xs text-gray-500 bg-gray-50 p-3 rounded-lg border border-gray-200 font-mono">{panel.image_prompt}</p>
+                      <p>{panel.image_prompt}</p>
+                      <button
+                        className="copy-prompt"
+                        type="button"
+                        onClick={() => copyText(panel.image_prompt, panel.panel_number)}
+                      >
+                        {copiedPanel === panel.panel_number ? 'Prompt tersalin!' : 'Salin prompt'}
+                      </button>
                     </details>
                   </div>
-                </div>
+                </article>
               ))}
             </div>
-          </div>
+          </section>
         )}
+        </section>
+
+        <section className="about-section" id="tentang" aria-labelledby="about-heading">
+          <div className="about-intro">
+            <span className="step-label">TENTANG PLATFORM</span>
+            <h2 id="about-heading">Dari ide sederhana menjadi cerita visual.</h2>
+            <p>
+              AI Storyboard Generator membantu kamu memvisualisasikan naskah cerita.
+              Cukup tulis ide, tentukan karakter, lalu biarkan AI menyusun empat adegan
+              yang bisa menjadi titik awal karya kreatifmu.
+            </p>
+          </div>
+
+          <div className="about-features">
+            <article className="about-feature">
+              <span className="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M5 4.5h14v15H5zM8 8h8m-8 4h5m-5 4h7" />
+                </svg>
+              </span>
+              <h3>Mulai dari naskahmu</h3>
+              <p>Masukkan cerita singkat dan referensi karakter agar visual lebih sesuai idemu.</p>
+            </article>
+            <article className="about-feature">
+              <span className="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M4 5h7v6H4zm9 0h7v6h-7zM4 13h7v6H4zm9 0h7v6h-7z" />
+                </svg>
+              </span>
+              <h3>Empat adegan terstruktur</h3>
+              <p>AI merangkum cerita menjadi empat panel lengkap dengan deskripsi dan sudut kamera.</p>
+            </article>
+            <article className="about-feature">
+              <span className="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12m0-12.72-2.12 2.12m-8.48 8.48-2.12 2.12M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" />
+                </svg>
+              </span>
+              <h3>Visual untuk inspirasi</h3>
+              <p>Lihat ilustrasi tiap adegan dan gunakan hasilnya sebagai awal proses kreatif.</p>
+            </article>
+          </div>
+
+          <div className="about-cta">
+            <div>
+              <strong>Punya cerita di kepala?</strong>
+              <span>Mulai ubah jadi storyboard sekarang.</span>
+            </div>
+            <a href="#generator">
+              Mulai membuat
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M5 12h14m-6-6 6 6-6 6" />
+              </svg>
+            </a>
+          </div>
+        </section>
       </div>
+      <footer className="page-footer">
+        <span>© 2026 AI Storyboard Generator</span>
+        <a href="#beranda">Kembali ke atas ↑</a>
+      </footer>
     </main>
   );
 }
